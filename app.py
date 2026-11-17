@@ -92,8 +92,12 @@ def main():
     puntaje, nivel, pct = predecir_riesgo(caso, A)
     mostrar = {"Bajo": st.success, "Medio": st.warning, "Alto": st.error}[nivel]
     mostrar(f"Riesgo {nivel.lower()}")
-    st.metric("Bajo peso observado en casos similares", f"{pct:.1f} %".replace(".", ","))
-    st.caption(f"Puntaje del modelo: {puntaje:.3f}")
+    c1, c2 = st.columns(2)
+    c1.metric("Bajo peso en casos similares", f"{pct:.1f} %".replace(".", ","))
+    c2.metric("Promedio nacional", "11,0 %")
+    puntaje = f"{puntaje:.3f}".replace(".", ",")
+    st.caption(f"De cada 100 nacimientos con un puntaje parecido, {round(pct)} nacieron con bajo peso. "
+               f"Puntaje del modelo: {puntaje}")
 
 
 if __name__ == "__main__":
