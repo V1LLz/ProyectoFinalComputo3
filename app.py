@@ -14,6 +14,16 @@ ORDEN = {
 }
 ORDEN["NIV_EDUP"] = ORDEN["NIV_EDUM"] + ["Sin información"]
 
+NOMBRES = {
+    "T_GES_AGRU_CIE": "Semanas de gestación", "MUL_PARTO": "Tipo de embarazo",
+    "EDAD_MADRE": "Edad de la madre", "EST_CIVM": "Estado conyugal",
+    "NIV_EDUM": "Educación de la madre", "NIV_EDUP": "Educación del padre",
+    "DEPARTAMENTO": "Departamento", "AREA_RES": "Área de residencia",
+    "SEG_SOCIAL": "Seguridad social", "IDPERTET": "Pertenencia étnica", "SEXO": "Sexo del bebé",
+    "NUMCONSUL": "Consultas prenatales", "N_HIJOSV": "Hijos nacidos vivos",
+    "N_EMB": "Número de embarazos", "EDAD_PADRE": "Edad del padre",
+}
+
 
 @st.cache_resource
 def cargar_modelo():
@@ -27,15 +37,30 @@ def opciones(A, col):
     return validas
 
 
-def predecir_riesgo(caso, A):
+def preparar(caso, A):
     fila = pd.get_dummies(pd.DataFrame([caso]), columns=A["categoricas"], dtype="int8")
     fila = fila.reindex(columns=A["columnas"], fill_value=0)
     fila[A["numericas"]] = A["escalador"].transform(fila[A["numericas"]])
+    return fila
 
+
+def predecir_riesgo(fila, A):
     puntaje = float(A["modelo"].predict_proba(fila)[0, 1])
     n = A["niveles_riesgo"]
     rango = n[(puntaje >= n["puntaje_min"]) & (puntaje <= n["puntaje_max"])].iloc[0]
     return puntaje, rango["nivel"], float(rango["pct_real_bajo_peso"])
+
+
+def factores(caso, fila, A):
+    # Categóricas: coeficiente de la categoría elegida frente al promedio de su variable
+    coef = pd.Series(A["modelo"].coef_[0], index=A["columnas"])
+    aportes = {}
+    for col in A["categoricas"]:
+        grupo = coef[[c for c in A["columnas"] if c.startswith(col + "_")]]
+        aportes[f"{NOMBRES[col]}: {caso[col]}"] = coef[f"{col}_{caso[col]}"] - grupo.mean()
+    for col in A["numericas"]:
+        aportes[f"{NOMBRES[col]}: {caso[col]}"] = coef[col] * fila[col].iloc[0]
+    return pd.Series(aportes)
 
 
 def formulario(A):
@@ -79,6 +104,19 @@ def formulario(A):
     }
 
 
+def mostrar_factores(aportes, n=6):
+    top = aportes[aportes.abs().sort_values(ascending=False).index[:n]]
+    tabla = pd.DataFrame({
+        "Dato": top.index,
+        "Aporte": top.values,
+        "Aumenta el riesgo": top.clip(lower=0).values,
+        "Reduce el riesgo": top.clip(upper=0).values,
+    })
+    st.bar_chart(tabla, x="Dato", y=["Aumenta el riesgo", "Reduce el riesgo"],
+                 color=["#E24A33", "#348ABD"], horizontal=True, sort="-Aporte",
+                 x_label="Aporte al puntaje", y_label="")
+
+
 def main():
     st.set_page_config(page_title="Bajo peso al nacer")
     st.title("Riesgo de bajo peso al nacer")
@@ -89,7 +127,8 @@ def main():
     if caso is None:
         return
 
-    puntaje, nivel, pct = predecir_riesgo(caso, A)
+    fila = preparar(caso, A)
+    puntaje, nivel, pct = predecir_riesgo(fila, A)
     mostrar = {"Bajo": st.success, "Medio": st.warning, "Alto": st.error}[nivel]
     mostrar(f"Riesgo {nivel.lower()}")
     c1, c2 = st.columns(2)
@@ -98,6 +137,9 @@ def main():
     puntaje = f"{puntaje:.3f}".replace(".", ",")
     st.caption(f"De cada 100 nacimientos con un puntaje parecido, {round(pct)} nacieron con bajo peso. "
                f"Puntaje del modelo: {puntaje}")
+
+    st.subheader("Datos que más influyeron")
+    mostrar_factores(factores(caso, fila, A))
 
 
 if __name__ == "__main__":
