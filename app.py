@@ -1,6 +1,8 @@
 from pathlib import Path
 
+import altair as alt
 import joblib
+import numpy as np
 import pandas as pd
 import streamlit as st
 
@@ -15,13 +17,19 @@ ORDEN = {
 ORDEN["NIV_EDUP"] = ORDEN["NIV_EDUM"] + ["Sin información"]
 
 NOMBRES = {
-    "T_GES_AGRU_CIE": "Semanas de gestación", "MUL_PARTO": "Tipo de embarazo",
-    "EDAD_MADRE": "Edad de la madre", "EST_CIVM": "Estado conyugal",
-    "NIV_EDUM": "Educación de la madre", "NIV_EDUP": "Educación del padre",
-    "DEPARTAMENTO": "Departamento", "AREA_RES": "Área de residencia",
-    "SEG_SOCIAL": "Seguridad social", "IDPERTET": "Pertenencia étnica", "SEXO": "Sexo del bebé",
-    "NUMCONSUL": "Consultas prenatales", "N_HIJOSV": "Hijos nacidos vivos",
-    "N_EMB": "Número de embarazos", "EDAD_PADRE": "Edad del padre",
+    "T_GES_AGRU_CIE": "Gestación", "MUL_PARTO": "Embarazo",
+    "EDAD_MADRE": "Edad madre", "EST_CIVM": "Estado conyugal",
+    "NIV_EDUM": "Educación madre", "NIV_EDUP": "Educación padre",
+    "DEPARTAMENTO": "Depto.", "AREA_RES": "Área", "SEG_SOCIAL": "Seg. social",
+    "IDPERTET": "Etnia", "SEXO": "Sexo bebé", "NUMCONSUL": "Consultas",
+    "N_HIJOSV": "Hijos vivos", "N_EMB": "Embarazos", "EDAD_PADRE": "Edad padre",
+}
+
+MAS_COMUN = {
+    "T_GES_AGRU_CIE": "37 a 41", "MUL_PARTO": "Simple", "EDAD_MADRE": "20-24",
+    "EST_CIVM": "Unión libre 2 años o más", "NIV_EDUM": "Media", "NIV_EDUP": "Media",
+    "DEPARTAMENTO": "Bogotá", "AREA_RES": "Cabecera municipal", "SEG_SOCIAL": "Subsidiado",
+    "IDPERTET": "Ninguno", "SEXO": "Masculino",
 }
 
 
@@ -52,12 +60,11 @@ def predecir_riesgo(fila, A):
 
 
 def factores(caso, fila, A):
-    # Categóricas: coeficiente de la categoría elegida frente al promedio de su variable
+    # Cada dato se compara con el valor más común en los nacimientos de entrenamiento
     coef = pd.Series(A["modelo"].coef_[0], index=A["columnas"])
     aportes = {}
     for col in A["categoricas"]:
-        grupo = coef[[c for c in A["columnas"] if c.startswith(col + "_")]]
-        aportes[f"{NOMBRES[col]}: {caso[col]}"] = coef[f"{col}_{caso[col]}"] - grupo.mean()
+        aportes[f"{NOMBRES[col]}: {caso[col]}"] = coef[f"{col}_{caso[col]}"] - coef[f"{col}_{MAS_COMUN[col]}"]
     for col in A["numericas"]:
         aportes[f"{NOMBRES[col]}: {caso[col]}"] = coef[col] * fila[col].iloc[0]
     return pd.Series(aportes)
@@ -104,25 +111,70 @@ def formulario(A):
     }
 
 
+def veces(aporte):
+    razon = np.exp(abs(aporte))
+    texto = f"{razon:.1f}".replace(".", ",")
+    return f"×{texto} más" if aporte > 0 else f"×{texto} menos"
+
+
 def mostrar_factores(aportes, n=6):
     top = aportes[aportes.abs().sort_values(ascending=False).index[:n]]
     tabla = pd.DataFrame({
-        "Dato": top.index,
-        "Aporte": top.values,
-        "Aumenta el riesgo": top.clip(lower=0).values,
-        "Reduce el riesgo": top.clip(upper=0).values,
+        "Dato": [f"{d} ({veces(a)})" for d, a in top.items()],
+        "Veces": np.exp(top.values),
+        "Base": 1.0,
+        "Efecto": ["Aumenta el riesgo" if a > 0 else "Reduce el riesgo" for a in top.values],
     })
-    st.bar_chart(tabla, x="Dato", y=["Aumenta el riesgo", "Reduce el riesgo"],
-                 color=["#E24A33", "#348ABD"], horizontal=True, sort="-Aporte",
-                 x_label="Aporte al puntaje", y_label="")
+    grafico = alt.Chart(tabla).mark_bar().encode(
+        x=alt.X("Veces", title="Riesgo frente al caso más común (escala logarítmica)",
+                scale=alt.Scale(type="log")),
+        x2="Base",
+        y=alt.Y("Dato", sort=alt.EncodingSortField("Veces", order="descending"), title=None,
+                axis=alt.Axis(labelLimit=300)),
+        color=alt.Color("Efecto", title=None, legend=alt.Legend(orient="bottom"),
+                        scale=alt.Scale(domain=["Aumenta el riesgo", "Reduce el riesgo"],
+                                        range=["#E24A33", "#348ABD"])),
+        tooltip=["Dato"],
+    )
+    st.altair_chart(grafico, width="stretch")
 
 
-def main():
-    st.set_page_config(page_title="Bajo peso al nacer")
-    st.title("Riesgo de bajo peso al nacer")
-    st.caption("Proyecto Computación 3 - Universidad de los Llanos. Datos: EEVV 2023, DANE.")
+def pantalla_modelo(A):
+    st.subheader("Resultados en el conjunto de prueba")
+    st.write("Regresión logística evaluada con 100.978 nacimientos que no se usaron para entrenar.")
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Recall", "64,7 %", help="Casos de bajo peso que el modelo detecta")
+    c2.metric("Precisión", "52,8 %", help="Alertas que sí fueron bajo peso")
+    c3.metric("AUC", "0,841", help="0,5 es azar y 1 es perfecto")
+    st.write("De 11.106 bebés con bajo peso, el modelo detectó 7.186. Generó 6.421 falsas alarmas "
+             "entre 89.872 nacimientos de peso normal.")
 
-    A = cargar_modelo()
+    st.subheader("Bajo peso real según el puntaje")
+    grupos = A["niveles_riesgo"].reset_index().rename(columns={"index": "Grupo"})
+    grupos["Grupo"] += 1
+    grafico = alt.Chart(grupos).mark_bar().encode(
+        x=alt.X("Grupo:O", title="Grupo de puntaje (de menor a mayor)", axis=alt.Axis(labelAngle=0)),
+        y=alt.Y("pct_real_bajo_peso", title="% con bajo peso"),
+        color=alt.Color("nivel", title="Nivel", legend=alt.Legend(orient="bottom"),
+                        scale=alt.Scale(domain=["Bajo", "Medio", "Alto"],
+                                        range=["#348ABD", "#E8A33D", "#E24A33"])),
+        tooltip=[alt.Tooltip("pct_real_bajo_peso", title="% bajo peso"), "nivel"],
+    )
+    st.altair_chart(grafico, width="stretch")
+    st.caption("Cada grupo tiene unos 5.000 nacimientos. El nivel de riesgo se asigna según el "
+               "porcentaje observado: bajo si está por debajo del promedio nacional (11 %), "
+               "alto si es 50 % o más.")
+
+    st.subheader("Limitaciones")
+    st.markdown(
+        "- Las semanas de gestación son la variable que más pesa: sin ellas el AUC baja de 0,84 a 0,68.\n"
+        "- Cerca de un tercio de los casos de bajo peso no se detecta, sobre todo en bebés a término.\n"
+        "- Solo usa datos del certificado de nacido vivo de 2023; no incluye datos clínicos.\n"
+        "- Es una herramienta académica y no reemplaza la valoración médica."
+    )
+
+
+def pantalla_prediccion(A):
     caso = formulario(A)
     if caso is None:
         return
@@ -139,7 +191,21 @@ def main():
                f"Puntaje del modelo: {puntaje}")
 
     st.subheader("Datos que más influyeron")
+    st.caption("Cada barra compara el dato con el valor más común en los nacimientos del país.")
     mostrar_factores(factores(caso, fila, A))
+
+
+def main():
+    st.set_page_config(page_title="Bajo peso al nacer")
+    st.title("Riesgo de bajo peso al nacer")
+    st.caption("Proyecto Computación 3 - Universidad de los Llanos. Datos: EEVV 2023, DANE.")
+
+    A = cargar_modelo()
+    prediccion, modelo = st.tabs(["Predicción", "Sobre el modelo"])
+    with prediccion:
+        pantalla_prediccion(A)
+    with modelo:
+        pantalla_modelo(A)
 
 
 if __name__ == "__main__":
